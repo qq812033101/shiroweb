@@ -1,0 +1,147 @@
+1 授权需要继承 AuthorizingRealm 这个类 并实现其 doGetAuthorizationInfo 的抽象方法
+2 AuthorizingRealm 这个类继承至 AuthorizingRealm 但没有实现
+AuthenticatingRealm 这个类中的 doGetAuthenticationInfo 这个抽象方法 所以认证和授权只需要继承 AuthorizingRealm 这个类就可以了 同时实现他的两个抽象方法
+
+
+
+
+在 ModularRealmAuthenticator  里可以通过 authenticationStrategy 属性 通过Realms 配多个 Realm 也可以直接 在securityManager 里 通过Realms 配多个Realms 这样配会更好用
+
+  在securityManager 里调用的认证还是 Authenticator.authenticate 的认证方法 但我们并没有把该Realms配给 ModularRealmAuthenticator 的 Authenticator 属性
+
+实际上当shiro初始化的时候 会在这 AuthenticatingSecurityManager 这个类的 这个 方法里面进行通过 ModularRealmAuthenticator.setRealm 方法对其进行赋值
+AuthenticatingSecurityManager 这个类最终是继承于 securityManager 这接口
+    protected void afterRealmsSet() {
+        super.afterRealmsSet();
+        if (this.authenticator instanceof ModularRealmAuthenticator) {
+            ((ModularRealmAuthenticator)this.authenticator).setRealms(this.getRealms()); 重点！！！
+        }
+    }
+
+
+多Realm 验证的策略（策略模式）
+1 有一个 AuthenticationStrategy 接口
+
+1。1 第一个实现类 FirstSuccessfulStrategy
+    只要有一个Realm验证成功即可，只返回第一个Realm的身份验证信息 其他不返回
+
+1.2 AtLeastOneSuccessfulStrategy
+    只要有一个Realm验证成功即可，但会返回所有的Realm 认证信息
+1.3 AllSuccessfulStrategy
+    所有的Realm验证成功才算成功，并返回所有信息，有一个失败就全失败
+
+1.4 ModularRealmAuthenticator 该类默认使用的是 AtLeastOneSuccessfulStrategy 这个实现类
+1.4.1 在 ModularRealmAuthenticator类中 使用这个方法获得认证策略对象
+AuthenticationInfo aggregate = strategy.beforeAllAttempts(realms, token);
+
+如何修改认证策略
+<bean id="authenticator" class="org.apache.shiro.authc.pam.ModularRealmAuthenticator">
+        <property name="realms">
+            <list>
+                <ref bean="jdbcRealm"/>
+                <ref bean="secondRealm"/>
+            </list>
+        </property>
+
+        <property name="authenticationStrategy">
+            <bean class="org.apache.shiro.authc.pam.AllSuccessfulStrategy"></bean>
+
+        </property>
+    </bean>
+
+
+
+多Realm 验证
+在这个类的 ModularRealmAuthenticator 的这个方法中
+进行多Reaml匹配
+protected AuthenticationInfo doAuthenticate(AuthenticationToken authenticationToken) throws AuthenticationException {
+        this.assertRealmsConfigured();
+        Collection<Realm> realms = this.getRealms(); 获取的Realm是一个泛型集合
+        return realms.size() == 1 ? this.doSingleRealmAuthentication((Realm)realms.iterator().next(), authenticationToken) : this.doMultiRealmAuthentication(realms, authenticationToken);
+    }
+    当只有1个Realm 则返回 this.doSingleRealmAuthentication((Realm)realms.iterator().next(), authenticationToken)
+    否则 返回 this.doMultiRealmAuthentication(realms, authenticationToken);
+
+
+    xml 中的配置
+     <bean id="authenticator" class="org.apache.shiro.authc.pam.ModularRealmAuthenticator">
+            <property name="realms">
+                <list>
+                    <ref bean="jdbcRealm"/>
+                    <ref bean="secondRealm"/>
+                </list>
+            </property>
+        </bean>
+
+ <bean id="securityManager" class="org.apache.shiro.web.mgt.DefaultWebSecurityManager">
+        <!--<property name="cacheManager" ref="cacheManager"/>-->
+        <!-- Single realm app.  If you have multiple realms, use the 'realms' property instead. -->
+        <property name="authenticator" ref="authenticator"/>
+        <property name="sessionManager" ref="sessionManager"/>
+    </bean>
+
+1 为什么使用MD5盐值加密 ：让相同的密码有不同的md5值 让密码更加的安全
+2 如何做到？
+    2.1 在doGetAuthenticationInfo 方法返回值创建 SimpleAuthenticationInfo 这个对象的时候 需要使用比较复杂的构造器(4参数带盐值得构造器)
+    2.2 使用 ByteSource.Util.bytes 来计算盐值
+    2.3 盐值需要唯一 一般使用随机字符串 或者账户ID
+    2.4 使用SimpleAuthenticationInfo的4参数构造器来计算盐值加密后的密码值
+
+
+
+1 如何把字符串加密为MD5
+2 替换当前Realm的 credentialsMatcher 属性 直接使用 HashedCredentialsMatcher 这个对象。并设置属性加密算法即可
+
+   在 HashedCredentialsMatcher 这个类中的
+
+   protected Hash hashProvidedCredentials(Object credentials, Object salt, int hashIterations) {
+            String hashAlgorithmName = this.assertHashAlgorithmName();
+            return new SimpleHash(hashAlgorithmName, credentials, salt, hashIterations);这里进行加密
+        }
+
+hashIterations 加密次数 默认为1 可以手动修改
+
+
+
+
+密码的比对：
+通过AuthenticatingRealm的 credentialsMatcher 来进行的密码的比对！！！
+
+
+1 先需要获取当前的Subject  调用SecurityUtil.getSubject();
+2 测试当前的用户是否已经被认证了 调用subject的 isAuthenticated();
+3 若没有被认证则把用户名跟密码封装成UsernamePasswordToken对象
+    3.1 创建一个表单页面
+    3.2 把请求提交到mvc的handler
+    3.3 获取用户名跟密码
+    3.4 执行登录 调用subect的 login(AuthenticationToken);方法 AuthenticationToken是一个接口 说明 UsernamePasswordToken是他的一个实现类
+    3.5 自定义Realm的方法 从数据库中获取对应的记录 返回给shiro
+    3.5.1 实际上需要继承org.apache.shiro.realm.AuthenticatingRealm
+    3.5.2 实现doGetAuthenticationInfo(AuthenticationToken)方法.
+    3.6 由shiro 完成密码的比对。
+
+ //底层会调用Subject接口的实现类 DelegatingSubject 的login方法
+                // 这个实现类里面又会使用  Subject subject = this.securityManager.login(this, token);
+                //securityManager.login里面会 会调用 info = this.authenticate(token); 这个方法执行认证
+                // 在进去 会调用DefaultSecurityManager这个类的 构造方法
+                // return this.authenticator.authenticate(token); 方法
+
+                //authenticator 认证器
+
+                //在进去 会调用 AbstractAuthenticator.class
+                // 这个抽象类的public final AuthenticationInfo authenticate(AuthenticationToken token)方法
+                //该方法里面 会调用 info = this.c;这个方法
+
+                // 在进去 会调用ModularRealmAuthenticator.class这个类的
+                // protected AuthenticationInfo doAuthenticate(AuthenticationToken authenticationToken)方法
+                //在这个方法里面 需要调用Collection<Realm> realms = this.getRealms(); 获取Realm
+                //在点进去 会调到ModularRealmAuthenticator.class类中的
+                //doSingleRealmAuthentication这个方法 该方法里面又调用了
+                //AuthenticationInfo info = realm.getAuthenticationInfo(token);这个方法
+
+                //在点进去 会调用AuthenticatingRealm.class 这个类的
+                // public final AuthenticationInfo getAuthenticationInfo(AuthenticationToken token) 方法
+                //该方法里面又会调用info = this.doGetAuthenticationInfo(token);
+                //这个方法 又是自定义类实现了Realm 接口后要重新的方法 该方法所在的类又是AuthenticatingRealm 这个初生类
+
+
